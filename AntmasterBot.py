@@ -791,6 +791,291 @@ def normalize_scientific_name(name):
         logger.error(f"Error normalizando nombre científico: {str(e)}")
         return name.strip()
 
+def procesar_descripcion_completa(descripcion):
+    """Post-procesa una descripción para asegurar que termine correctamente"""
+    try:
+        if not descripcion:
+            return descripcion
+        
+        # Eliminar espacios extra
+        descripcion = descripcion.strip()
+        
+        # Si la descripción termina abruptamente (sin puntuación), intentar completarla
+        if descripcion and not descripcion[-1] in '.!?🐜':
+            # Buscar la última oración completa
+            last_sentence_end = max(
+                descripcion.rfind('.'),
+                descripcion.rfind('!'),
+                descripcion.rfind('?')
+            )
+            
+            if last_sentence_end > len(descripcion) * 0.7:  # Si la última oración completa está cerca del final
+                descripcion = descripcion[:last_sentence_end + 1]
+            else:
+                # Si no hay una oración completa cerca del final, agregar punto
+                descripcion = descripcion.rstrip() + '.'
+        
+        # Asegurar que no exceda 450 caracteres
+        if len(descripcion) > 450:
+            # Buscar el último punto antes de 450 caracteres
+            truncate_point = descripcion[:450].rfind('.')
+            if truncate_point > 300:  # Solo truncar si hay un punto razonable
+                descripcion = descripcion[:truncate_point + 1]
+            else:
+                descripcion = descripcion[:447] + '...'
+        
+        return descripcion
+        
+    except Exception as e:
+        logger.error(f"Error procesando descripción: {str(e)}")
+        return descripcion
+
+async def recopilar_informacion_completa(nombre_cientifico):
+    """Recopila TODA la información disponible de todas las fuentes"""
+    try:
+        logger.info(f"Recopilando información completa para: {nombre_cientifico}")
+        
+        info_completa = {
+            'scientific_name': nombre_cientifico,
+            'photo_url': None,
+            'info_texto': '',
+            'fuentes': []
+        }
+        
+        # 1. Buscar en iNaturalist
+        try:
+            inat_info = await buscar_en_inaturalist(nombre_cientifico)
+            if inat_info:
+                info_completa['fuentes'].append('iNaturalist')
+                if inat_info.get('photo_url'):
+                    info_completa['photo_url'] = inat_info['photo_url']
+                if inat_info.get('description'):
+                    info_completa['info_texto'] += f"iNaturalist: {inat_info['description']}\n"
+                if inat_info.get('observations'):
+                    info_completa['info_texto'] += f"Observaciones registradas: {inat_info['observations']}\n"
+        except Exception as e:
+            logger.error(f"Error recopilando de iNaturalist: {str(e)}")
+        
+        # 2. Buscar en AntOnTop
+        try:
+            antontop_info = await buscar_info_antontop(nombre_cientifico)
+            if antontop_info:
+                info_completa['fuentes'].append('AntOnTop')
+                if antontop_info.get('short_description'):
+                    info_completa['info_texto'] += f"AntOnTop - Descripción: {antontop_info['short_description']}\n"
+                if antontop_info.get('behavior'):
+                    info_completa['info_texto'] += f"AntOnTop - Comportamiento: {antontop_info['behavior']}\n"
+                if antontop_info.get('region'):
+                    info_completa['info_texto'] += f"AntOnTop - Región: {antontop_info['region']}\n"
+                if antontop_info.get('habitat'):
+                    info_completa['info_texto'] += f"AntOnTop - Hábitat: {antontop_info['habitat']}\n"
+                if not info_completa['photo_url'] and antontop_info.get('photo_url'):
+                    info_completa['photo_url'] = antontop_info['photo_url']
+        except Exception as e:
+            logger.error(f"Error recopilando de AntOnTop: {str(e)}")
+        
+        # 3. Buscar en AntCube
+        try:
+            antcube_info = await buscar_info_antcube(nombre_cientifico)
+            if antcube_info:
+                info_completa['fuentes'].append('AntCube')
+                if antcube_info.get('description'):
+                    info_completa['info_texto'] += f"AntCube - Descripción: {antcube_info['description']}\n"
+                if antcube_info.get('difficulty'):
+                    info_completa['info_texto'] += f"AntCube - Dificultad de cría: {antcube_info['difficulty']}\n"
+                if antcube_info.get('temperature'):
+                    info_completa['info_texto'] += f"AntCube - Temperatura: {antcube_info['temperature']}\n"
+                if antcube_info.get('humidity'):
+                    info_completa['info_texto'] += f"AntCube - Humedad: {antcube_info['humidity']}\n"
+                if antcube_info.get('hibernation'):
+                    info_completa['info_texto'] += f"AntCube - Hibernación: {antcube_info['hibernation']}\n"
+                if antcube_info.get('nutrition'):
+                    info_completa['info_texto'] += f"AntCube - Nutrición: {antcube_info['nutrition']}\n"
+        except Exception as e:
+            logger.error(f"Error recopilando de AntCube: {str(e)}")
+        
+        # 4. Buscar en AntWiki (foto de respaldo)
+        try:
+            genus, species = nombre_cientifico.split()[:2]
+            antwiki_info = await buscar_foto_antwiki(genus, species)
+            if antwiki_info:
+                info_completa['fuentes'].append('AntWiki')
+                if not info_completa['photo_url'] and antwiki_info.get('photo_url'):
+                    info_completa['photo_url'] = antwiki_info['photo_url']
+        except Exception as e:
+            logger.error(f"Error recopilando de AntWiki: {str(e)}")
+        
+        logger.info(f"Información recopilada de {len(info_completa['fuentes'])} fuentes: {info_completa['fuentes']}")
+        return info_completa
+        
+    except Exception as e:
+        logger.error(f"Error recopilando información completa: {str(e)}")
+        return {'scientific_name': nombre_cientifico, 'info_texto': '', 'photo_url': None, 'fuentes': []}
+
+async def generar_descripcion_con_imagen_completa(nombre_cientifico, info_completa):
+    """Genera descripción usando GPT-4 Vision con toda la información disponible"""
+    try:
+        photo_url = info_completa.get('photo_url')
+        if not photo_url:
+            return None
+        
+        logger.info(f"Analizando imagen de {nombre_cientifico} con información completa")
+        
+        # Verificar que tenemos la clave de OpenAI
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            logger.error("No se encontró la clave de OpenAI para análisis de imagen")
+            return None
+        
+        # Crear prompt con TODA la información disponible
+        prompt = f"""Analiza esta imagen de {nombre_cientifico} y crea una descripción específica y fascinante combinando lo que ves con la información científica disponible.
+
+INFORMACIÓN CIENTÍFICA DISPONIBLE:
+{info_completa.get('info_texto', 'Información limitada')}
+
+INSTRUCCIONES CRÍTICAS:
+1. MÁXIMO 450 caracteres (para evitar cortes)
+2. COMBINA lo que ves en la imagen con la información científica
+3. DESCRIBE colores exactos, patrones, texturas que observas
+4. INCLUYE datos específicos de comportamiento, hábitat, cría de la información
+5. MENCIONA características únicas visibles y conocidas
+6. SÉ ESPECÍFICO sobre adaptaciones, alimentación, construcción de nidos
+7. EVITA frases genéricas como "conocida por su tipo de"
+8. Usa un tono científico pero emocionante
+9. Máximo 1 emoji al final
+10. IMPORTANTE: Termina SIEMPRE con una oración completa
+
+EJEMPLO: "Presenta un exoesqueleto marrón rojizo brillante con mandíbulas robustas. Construye nidos subterráneos en bosques húmedos, cultiva hongos para alimentarse y requiere hibernación a 15°C."
+
+Responde SOLO con la descripción específica y fascinante."""
+
+        client = AsyncOpenAI(api_key=api_key)
+        completion = await client.chat.completions.create(
+            model="gpt-4-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": photo_url,
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.7,
+            max_tokens=200
+        )
+        
+        descripcion = completion.choices[0].message.content.strip()
+        
+        # Post-procesar para asegurar que termine correctamente
+        descripcion = procesar_descripcion_completa(descripcion)
+        
+        logger.info(f"Descripción completa con imagen generada para {nombre_cientifico}: {descripcion[:100]}...")
+        
+        # Guardar la descripción en la base de datos
+        if descripcion:
+            if db.save_species_description(nombre_cientifico, descripcion):
+                logger.info(f"Descripción completa guardada en caché para: {nombre_cientifico}")
+            else:
+                logger.warning(f"No se pudo guardar la descripción completa en caché para: {nombre_cientifico}")
+        
+        return descripcion
+        
+    except Exception as e:
+        logger.error(f"Error generando descripción completa con imagen para {nombre_cientifico}: {str(e)}")
+        return None
+
+async def generar_descripcion_con_imagen(nombre_cientifico):
+    """Genera descripción usando GPT-4 Vision para analizar la imagen de la hormiga"""
+    try:
+        # Obtener imagen de iNaturalist
+        inat_info = await buscar_en_inaturalist(nombre_cientifico)
+        if not inat_info or not inat_info.get('photo_url'):
+            logger.info(f"No se encontró imagen en iNaturalist para {nombre_cientifico}")
+            return None
+        
+        photo_url = inat_info['photo_url']
+        logger.info(f"Analizando imagen de {nombre_cientifico} con GPT-4 Vision: {photo_url}")
+        
+        # Verificar que tenemos la clave de OpenAI
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            logger.error("No se encontró la clave de OpenAI para análisis de imagen")
+            return None
+        
+        # Crear prompt para análisis visual
+        prompt = f"""Analiza esta imagen de {nombre_cientifico} y crea una descripción específica y fascinante basada en lo que ves.
+
+INSTRUCCIONES CRÍTICAS:
+1. MÁXIMO 450 caracteres (para evitar cortes)
+2. DESCRIBE EXACTAMENTE lo que ves: colores específicos, patrones, texturas, formas
+3. MENCIONA características visuales únicas: brillo del exoesqueleto, forma de las antenas, estructura del tórax
+4. INCLUYE detalles de coloración: tonos exactos, gradientes, manchas, rayas
+5. DESCRIBE la postura y comportamiento visible en la imagen
+6. SÉ ESPECÍFICO sobre tamaño relativo de partes del cuerpo
+7. EVITA frases genéricas como "conocida por su tipo de"
+8. Usa un tono científico pero emocionante
+9. Máximo 1 emoji al final
+10. IMPORTANTE: Termina SIEMPRE con una oración completa
+
+EJEMPLO DE LO QUE QUIERO: "Presenta un exoesqueleto negro brillante con reflejos metálicos azulados, antenas largas y curvadas, y patas robustas de color marrón rojizo. Su cabeza es proporcionalmente grande con mandíbulas prominentes."
+
+Responde SOLO con la descripción visual específica y fascinante."""
+
+        client = AsyncOpenAI(api_key=api_key)
+        completion = await client.chat.completions.create(
+            model="gpt-4-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": photo_url,
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.7,
+            max_tokens=200
+        )
+        
+        descripcion = completion.choices[0].message.content.strip()
+        
+        # Post-procesar para asegurar que termine correctamente
+        descripcion = procesar_descripcion_completa(descripcion)
+        
+        logger.info(f"Descripción con análisis visual generada para {nombre_cientifico}: {descripcion[:100]}...")
+        
+        # Guardar la descripción en la base de datos
+        if descripcion:
+            if db.save_species_description(nombre_cientifico, descripcion):
+                logger.info(f"Descripción visual guardada en caché para: {nombre_cientifico}")
+            else:
+                logger.warning(f"No se pudo guardar la descripción visual en caché para: {nombre_cientifico}")
+        
+        return descripcion
+        
+    except Exception as e:
+        logger.error(f"Error generando descripción con imagen para {nombre_cientifico}: {str(e)}")
+        return None
+
 def generar_resumen_basico(result, inat_info, antwiki_info, distribucion):
     """Genera un resumen básico de la información de la especie"""
     try:
@@ -832,11 +1117,12 @@ client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 async def generar_descripcion_especie(nombre_cientifico: str) -> str:
     """Genera una descripción detallada de la especie usando ChatGPT y datos de AntWiki"""
     try:
-        # Primero intentar obtener la descripción cacheada
-        descripcion_cache = db.get_cached_description(nombre_cientifico)
-        if descripcion_cache:
-            logger.info(f"Descripción recuperada del caché para: {nombre_cientifico}")
-            return descripcion_cache
+        # Regenerar descripciones con los nuevos prompts mejorados
+        # (Comentado el caché para forzar regeneración con prompts actualizados)
+        # descripcion_cache = db.get_cached_description(nombre_cientifico)
+        # if descripcion_cache:
+        #     logger.info(f"Descripción recuperada del caché para: {nombre_cientifico}")
+        #     return descripcion_cache
             
         logger.info(f"Generando nueva descripción para: {nombre_cientifico}")
         genus, species = nombre_cientifico.split()[:2]
@@ -898,7 +1184,7 @@ async def generar_descripcion_especie(nombre_cientifico: str) -> str:
                                 next_elem = next_elem.find_next_sibling()
                         
                         # Preparar el prompt para ChatGPT
-                        prompt = f"""Genera un resumen BREVE Y CONCISO (máximo 700 caracteres) sobre la hormiga {nombre_cientifico} basado en la siguiente información.
+                        prompt = f"""Crea una descripción específica y fascinante sobre {nombre_cientifico} usando esta información.
                         
                         Información disponible:
                         Descripción: {' '.join(info['description'][:1])}
@@ -906,29 +1192,46 @@ async def generar_descripcion_especie(nombre_cientifico: str) -> str:
                         Hábitat: {' '.join(info['habitat'])}
                         Comportamiento: {' '.join(info['behavior'])}
                         
-                        REGLAS IMPORTANTES:
-                        1. IGNORA completamente cualquier medida, longitud, tamaño o dimensión
-                        2. PRIORIZA comportamientos sociales, hábitos de anidación y alimentación
-                        3. DESTACA características físicas distintivas (colores, formas, estructuras especiales)
-                        4. Menciona datos curiosos sobre su ecología o distribución
-                        5. Máximo 700 caracteres total
-                        6. Usa máximo 2 emojis
-                        7. Texto en español, estilo científico divulgativo
-                        8. Si no hay información relevante, indica "Información limitada disponible"
-                        """
+                        INSTRUCCIONES CRÍTICAS:
+                        1. MÁXIMO 500 caracteres
+                        2. NUNCA uses frases genéricas como "conocida por su tipo de colonia" o "tamaño de desarrollo"
+                        3. SÉ ESPECÍFICO: menciona comportamientos únicos, colores exactos, hábitats concretos
+                        4. PRIORIZA datos fascinantes: estrategias de caza, construcción de nidos, relaciones simbióticas
+                        5. INCLUYE detalles curiosos: qué comen específicamente, cómo se comunican, adaptaciones especiales
+                        6. EVITA completamente medidas y dimensiones
+                        7. Usa un tono científico pero emocionante
+                        8. Máximo 1 emoji al final
+                        9. Si no tienes información específica, enfócate en características generales conocidas del género
                         
-                        client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+                        EJEMPLO DE LO QUE NO QUIERO: "Es una hormiga conocida por su desarrollo y coloración"
+                        EJEMPLO DE LO QUE SÍ QUIERO: "Construye nidos bajo piedras, se alimenta de melaza de pulgones y forma colonias muy organizadas con obreras que patrullan en filas"
+                        
+                        Responde SOLO con la descripción específica y fascinante."""
+                        
+                        # Verificar que tenemos la clave de OpenAI
+                        api_key = os.getenv('OPENAI_API_KEY')
+                        if not api_key:
+                            logger.error("No se encontró la clave de OpenAI")
+                            return "Error: No se encontró la clave de OpenAI"
+                        
+                        logger.info(f"Enviando prompt a OpenAI para {nombre_cientifico}")
+                        client = AsyncOpenAI(api_key=api_key)
                         completion = await client.chat.completions.create(
                             model="gpt-3.5-turbo",
                             messages=[
-                                {"role": "system", "content": "Eres un experto en mirmecología especializado en generar resúmenes BREVES y precisos sobre especies de hormigas. Debes ser conciso y mantener el texto dentro del límite de caracteres."},
+                                {"role": "system", "content": "Eres un mirmecólogo experto especializado en crear descripciones específicas y fascinantes sobre hormigas. NUNCA uses frases genéricas o vacías. Siempre incluye comportamientos específicos, hábitats concretos y datos curiosos reales. Evita completamente frases como 'conocida por su tipo de' o 'tamaño de desarrollo'. IMPORTANTE: Siempre termina las oraciones completamente, nunca las dejes a medias."},
                                 {"role": "user", "content": prompt}
                             ],
-                            temperature=0.7,
+                            temperature=0.8,
                             max_tokens=200
                         )
                         
-                        descripcion = completion.choices[0].message.content
+                        descripcion = completion.choices[0].message.content.strip()
+                        
+                        # Post-procesar para asegurar que termine correctamente
+                        descripcion = procesar_descripcion_completa(descripcion)
+                        
+                        logger.info(f"Descripción generada exitosamente para {nombre_cientifico}: {descripcion[:100]}...")
                         
                         # Guardar la descripción en la base de datos
                         if descripcion:
@@ -939,7 +1242,78 @@ async def generar_descripcion_especie(nombre_cientifico: str) -> str:
                         
                         return descripcion
         
-        return None
+        # Si llegamos aquí sin descripción, recopilar TODA la información disponible
+        logger.warning(f"No se pudo obtener información de AntWiki para {nombre_cientifico}, recopilando información de todas las fuentes")
+        
+        # Recopilar información de todas las fuentes disponibles
+        info_completa = await recopilar_informacion_completa(nombre_cientifico)
+        
+        # Intentar análisis de imagen si hay foto disponible
+        if info_completa.get('photo_url'):
+            descripcion_con_imagen = await generar_descripcion_con_imagen_completa(nombre_cientifico, info_completa)
+            if descripcion_con_imagen:
+                return descripcion_con_imagen
+        
+        # Si no hay imagen o falla el análisis, usar toda la información textual disponible
+        logger.info(f"Generando descripción con información recopilada para {nombre_cientifico}")
+        
+        prompt = f"""Crea una descripción específica y fascinante sobre {nombre_cientifico} usando TODA esta información disponible.
+
+INFORMACIÓN RECOPILADA:
+{info_completa.get('info_texto', 'Información limitada disponible')}
+
+Crea una descripción específica y fascinante sobre {nombre_cientifico}.
+        
+        INSTRUCCIONES CRÍTICAS:
+        1. MÁXIMO 450 caracteres (para evitar cortes)
+        2. NUNCA uses frases genéricas como "conocida por su tipo de colonia" o "tamaño de desarrollo"
+        3. SÉ ESPECÍFICO: menciona comportamientos únicos, colores exactos, hábitats concretos
+        4. PRIORIZA datos fascinantes: estrategias de caza, construcción de nidos, relaciones simbióticas
+        5. INCLUYE detalles curiosos: qué comen específicamente, cómo se comunican, adaptaciones especiales
+        6. EVITA completamente medidas y dimensiones
+        7. Usa un tono científico pero emocionante
+        8. Máximo 1 emoji al final
+        9. Enfócate en características generales conocidas del género
+        10. IMPORTANTE: Termina SIEMPRE con una oración completa, nunca cortes a medias
+        
+        EJEMPLO DE LO QUE NO QUIERO: "Es una hormiga conocida por su desarrollo y coloración"
+        EJEMPLO DE LO QUE SÍ QUIERO: "Construye nidos bajo piedras, se alimenta de melaza de pulgones y forma colonias muy organizadas con obreras que patrullan en filas"
+        
+        Responde SOLO con la descripción específica y fascinante."""
+        
+        # Verificar que tenemos la clave de OpenAI
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            logger.error("No se encontró la clave de OpenAI")
+            return "Error: No se encontró la clave de OpenAI"
+        
+        logger.info(f"Enviando prompt básico a OpenAI para {nombre_cientifico}")
+        client = AsyncOpenAI(api_key=api_key)
+        completion = await client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Eres un mirmecólogo experto especializado en crear descripciones específicas y fascinantes sobre hormigas. NUNCA uses frases genéricas o vacías. Siempre incluye comportamientos específicos, hábitats concretos y datos curiosos reales. Evita completamente frases como 'conocida por su tipo de' o 'tamaño de desarrollo'. IMPORTANTE: Siempre termina las oraciones completamente, nunca las dejes a medias."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8,
+            max_tokens=200
+        )
+        
+        descripcion = completion.choices[0].message.content.strip()
+        
+        # Post-procesar para asegurar que termine correctamente
+        descripcion = procesar_descripcion_completa(descripcion)
+        
+        logger.info(f"Descripción básica generada exitosamente para {nombre_cientifico}: {descripcion[:100]}...")
+        
+        # Guardar la descripción en la base de datos
+        if descripcion:
+            if db.save_species_description(nombre_cientifico, descripcion):
+                logger.info(f"Descripción básica guardada en caché para: {nombre_cientifico}")
+            else:
+                logger.warning(f"No se pudo guardar la descripción básica en caché para: {nombre_cientifico}")
+        
+        return descripcion
         
     except Exception as e:
         logger.error(f"Error al generar descripción de especie: {str(e)}")
@@ -987,6 +1361,20 @@ async def buscar_especie_completa(scientific_name):
         except Exception as e:
             logger.error(f"Error buscando en AntOnTop: {str(e)}")
         
+        # Buscar en AntCube (información técnica de cría)
+        try:
+            antcube_info = await buscar_info_antcube(scientific_name)
+            if antcube_info:
+                species_data['antcube_info'] = antcube_info
+                if antcube_info.get('description'):
+                    # Priorizar descripción de AntCube si es más completa
+                    if not species_data['description'] or len(antcube_info['description']) > len(species_data.get('description', '')):
+                        species_data['description'] = antcube_info['description']
+                species_data['found_sources'].append('AntCube')
+                logger.info(f"Encontrado en AntCube: {scientific_name}")
+        except Exception as e:
+            logger.error(f"Error buscando en AntCube: {str(e)}")
+
         # Buscar en AntWiki (información adicional y foto de respaldo)
         try:
             genus, species = scientific_name.split()[:2]
@@ -1001,9 +1389,19 @@ async def buscar_especie_completa(scientific_name):
         except Exception as e:
             logger.error(f"Error buscando en AntWiki: {str(e)}")
         
-        # Si no tenemos descripción, generarla con IA usando toda la información disponible
+        # Si no tenemos descripción, intentar generar con análisis de imagen primero
         if not species_data['description']:
-            species_data['description'] = await generar_descripcion_mejorada(species_data)
+            # Intentar análisis visual si hay imagen de iNaturalist
+            if species_data.get('inat_info') and species_data['inat_info'].get('photo_url'):
+                descripcion_visual = await generar_descripcion_con_imagen(scientific_name)
+                if descripcion_visual:
+                    species_data['description'] = descripcion_visual
+                else:
+                    # Si falla el análisis visual, usar método tradicional
+                    species_data['description'] = await generar_descripcion_mejorada(species_data)
+            else:
+                # Si no hay imagen de iNaturalist, usar método tradicional
+                species_data['description'] = await generar_descripcion_mejorada(species_data)
         
         # Solo retornar si encontramos algo útil
         if species_data['found_sources'] or species_data['photo_url'] or species_data['description']:
@@ -1022,10 +1420,11 @@ async def generar_descripcion_mejorada(species_data):
     try:
         scientific_name = species_data['scientific_name']
         
-        # Verificar si ya existe en caché
-        descripcion_cache = db.get_cached_description(scientific_name)
-        if descripcion_cache:
-            return descripcion_cache
+        # Regenerar descripciones con los nuevos prompts mejorados
+        # (Comentado el caché para forzar regeneración con prompts actualizados)
+        # descripcion_cache = db.get_cached_description(scientific_name)
+        # if descripcion_cache:
+        #     return descripcion_cache
         
         # Recopilar toda la información disponible
         info_texto = f"Especie: {scientific_name}\n\n"
@@ -1044,6 +1443,18 @@ async def generar_descripcion_mejorada(species_data):
         if species_data.get('antwiki_info') and species_data['antwiki_info'].get('description'):
             info_texto += f"Información AntWiki: {species_data['antwiki_info']['description']}\n"
         
+        # Información de AntCube
+        if species_data.get('antcube_info'):
+            antcube = species_data['antcube_info']
+            if antcube.get('difficulty_level'):
+                info_texto += f"Dificultad de cría: {antcube['difficulty_level']}\n"
+            if antcube.get('habitat'):
+                info_texto += f"Hábitat natural: {antcube['habitat']}\n"
+            if antcube.get('colony_form'):
+                info_texto += f"Organización social: {antcube['colony_form']}\n"
+            if antcube.get('nutrition'):
+                info_texto += f"Alimentación: {antcube['nutrition']}\n"
+        
         # Información de iNaturalist
         if species_data.get('inat_info'):
             inat = species_data['inat_info']
@@ -1051,35 +1462,48 @@ async def generar_descripcion_mejorada(species_data):
                 info_texto += f"Nombre común: {inat['preferred_common_name']}\n"
         
         # Prompt mejorado para IA
-        prompt = f"""Basándote en la siguiente información, genera una descripción breve y atractiva sobre esta especie de hormiga.
+        prompt = f"""Eres un mirmecólogo experto. Crea una descripción fascinante y específica sobre esta especie de hormiga usando la información disponible.
 
 {info_texto}
 
-REGLAS ESTRICTAS:
-1. MÁXIMO 600 caracteres total
-2. IGNORA completamente medidas, longitudes y dimensiones
-3. PRIORIZA: comportamientos únicos, estrategias de supervivencia, hábitos sociales
-4. DESTACA: características físicas distintivas (colores, formas especiales)
-5. INCLUYE: datos curiosos sobre ecología o distribución si están disponibles
-6. Estilo: científico divulgativo, accesible y fascinante
-7. Idioma: español
-8. Máximo 2 emojis apropiados
-9. Si la información es limitada, sé honesto pero positivo
+INSTRUCCIONES CRÍTICAS:
+1. MÁXIMO 450 caracteres (para evitar cortes)
+2. NUNCA uses frases genéricas como "conocida por su tipo de colonia" o "tamaño de desarrollo"
+3. SÉ ESPECÍFICO: menciona comportamientos únicos, colores exactos, hábitats concretos
+4. PRIORIZA datos fascinantes: estrategias de caza, construcción de nidos, relaciones simbióticas
+5. INCLUYE detalles curiosos: qué comen específicamente, cómo se comunican, adaptaciones especiales
+6. EVITA completamente medidas y dimensiones
+7. Usa un tono científico pero emocionante
+8. Máximo 1 emoji al final
+9. Si no tienes información específica, enfócate en el género o características generales conocidas
+10. IMPORTANTE: Termina SIEMPRE con una oración completa, nunca cortes a medias
 
-Responde SOLO con la descripción, sin explicaciones adicionales."""
+EJEMPLO DE LO QUE NO QUIERO: "Es una hormiga conocida por su desarrollo y coloración"
+EJEMPLO DE LO QUE SÍ QUIERO: "Construye nidos bajo piedras, se alimenta de melaza de pulgones y forma colonias muy organizadas con obreras que patrullan en filas"
 
-        client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+Responde SOLO con la descripción específica y fascinante."""
+
+        # Verificar que tenemos la clave de OpenAI
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            logger.error("No se encontró la clave de OpenAI")
+            return "Error: No se encontró la clave de OpenAI"
+        
+        client = AsyncOpenAI(api_key=api_key)
         completion = await client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "Eres un mirmecólogo experto que crea descripciones fascinantes y precisas sobre hormigas para el público general, evitando datos técnicos como medidas."},
+                {"role": "system", "content": "Eres un mirmecólogo experto especializado en crear descripciones específicas y fascinantes sobre hormigas. NUNCA uses frases genéricas o vacías. Siempre incluye comportamientos específicos, hábitats concretos y datos curiosos reales. Evita completamente frases como 'conocida por su tipo de' o 'tamaño de desarrollo'. IMPORTANTE: Siempre termina las oraciones completamente, nunca las dejes a medias."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
+            temperature=0.8,
             max_tokens=200
         )
         
         descripcion = completion.choices[0].message.content.strip()
+        
+        # Post-procesar para asegurar que termine correctamente
+        descripcion = procesar_descripcion_completa(descripcion)
         
         # Guardar en caché
         if descripcion and db.save_species_description(scientific_name, descripcion):
@@ -1097,11 +1521,11 @@ async def enviar_informacion_especie_bd(message, species_result):
         scientific_name = species_result['scientific_name']
         logger.info(f"Enviando información de BD para: {scientific_name}")
         
-        # Obtener o generar descripción
-        descripcion = db.get_cached_description(scientific_name)
+        # Obtener o generar descripción (forzar regeneración con nuevos prompts)
+        descripcion = await generar_descripcion_especie(scientific_name)
         if not descripcion:
-            # Generar nueva descripción usando información disponible
-            descripcion = await generar_descripcion_especie(scientific_name)
+            # Si falla la generación, intentar obtener la cacheada como respaldo
+            descripcion = db.get_cached_description(scientific_name)
             if not descripcion:
                 descripcion = "Información disponible sobre esta especie de hormiga. 🐜"
         
@@ -1128,14 +1552,33 @@ async def enviar_informacion_especie_bd(message, species_result):
         # Buscar y enviar foto
         photo_url = await obtener_mejor_foto(scientific_name, species_result.get('photo_url'))
         
+        # SIEMPRE enviar foto primero si está disponible
         if photo_url:
             try:
-                await message.answer_photo(
-                    photo=photo_url,
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
+                # Verificar si el caption es muy largo para Telegram (límite ~1024 caracteres)
+                if len(caption) > 1000:
+                    # Si es muy largo, enviar foto primero y luego descripción separada
+                    await message.answer_photo(
+                        photo=photo_url,
+                        caption=f"🐜 *{scientific_name}*",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    # Enviar descripción completa en mensaje separado
+                    await message.answer(
+                        text=caption,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=keyboard
+                    )
+                    logger.info(f"Información enviada con foto separada para: {scientific_name}")
+                else:
+                    # Si el caption no es muy largo, enviar foto con descripción completa
+                    await message.answer_photo(
+                        photo=photo_url,
+                        caption=caption,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=keyboard
+                    )
+                    logger.info(f"Información enviada con foto y caption para: {scientific_name}")
                 return
             except Exception as e:
                 logger.error(f"Error enviando foto desde BD: {str(e)}")
@@ -1163,10 +1606,7 @@ async def enviar_informacion_especie_externa(message, species_data):
         # Construir mensaje
         caption = f"🐜 *{scientific_name}*\n\n{descripcion}\n\n"
         
-        # Agregar fuentes encontradas
-        if species_data.get('found_sources'):
-            fuentes = ", ".join(species_data['found_sources'])
-            caption += f"📚 *Fuentes:* {fuentes}\n"
+
         
         # Agregar información específica de AntOnTop
         if species_data.get('antontop_info'):
@@ -1179,15 +1619,33 @@ async def enviar_informacion_especie_externa(message, species_data):
         # Crear botones de enlaces
         keyboard = crear_teclado_enlaces(scientific_name)
         
-        # Enviar con foto si está disponible
+        # SIEMPRE enviar foto primero si está disponible
         if species_data.get('photo_url'):
             try:
-                await message.answer_photo(
-                    photo=species_data['photo_url'],
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=keyboard
-                )
+                # Verificar si el caption es muy largo para Telegram (límite ~1024 caracteres)
+                if len(caption) > 1000:
+                    # Si es muy largo, enviar foto primero y luego descripción separada
+                    await message.answer_photo(
+                        photo=species_data['photo_url'],
+                        caption=f"🐜 *{scientific_name}*",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    # Enviar descripción completa en mensaje separado
+                    await message.answer(
+                        text=caption,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=keyboard
+                    )
+                    logger.info(f"Información externa enviada con foto separada para: {scientific_name}")
+                else:
+                    # Si el caption no es muy largo, enviar foto con descripción completa
+                    await message.answer_photo(
+                        photo=species_data['photo_url'],
+                        caption=caption,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=keyboard
+                    )
+                    logger.info(f"Información externa enviada con foto y caption para: {scientific_name}")
                 return
             except Exception as e:
                 logger.error(f"Error enviando foto externa: {str(e)}")
@@ -1258,8 +1716,8 @@ def crear_teclado_enlaces(scientific_name):
                     url=f"https://www.inaturalist.org/taxa/search?q={genus}+{species}"
                 ),
                 InlineKeyboardButton(
-                    text="🏪 AntOnTop",
-                    url=f"https://antontop.com/es/{scientific_name.lower().replace(' ', '-')}/"
+                    text="🏪 AntMasterShop",
+                    url=f"https://antmastershop.com/search?q={scientific_name.replace(' ', '+')}"
                 )
             ]
         ])
@@ -2643,6 +3101,162 @@ async def buscar_info_antontop(species_name):
         logger.error(f"Error al buscar en AntOnTop: {str(e)}")
         return None
 
+async def buscar_info_antcube(species_name):
+    """Busca información de la especie en AntCube.shop."""
+    try:
+        logger.info(f"Buscando en AntCube: {species_name}")
+        
+        # Normalizar el nombre para la URL
+        genus, species = species_name.split()[:2]
+        
+        # Lista de URLs a probar (incluyendo variaciones con cf.)
+        urls_to_try = [
+            f"https://antcube.shop/es/producto/{genus.lower()}-{species.lower()}/",
+            f"https://antcube.shop/es/producto/{genus.lower()}-cf-{species.lower()}/",
+            f"https://antcube.shop/es/producto/{genus.lower()}{species.lower()}/",
+            f"https://antcube.shop/es/producto/{genus.lower()}cf{species.lower()}/",
+            f"https://antcube.shop/es/producto/{genus.lower()}-cf.{species.lower()}/",
+        ]
+        
+        session = await init_session()
+        html = None
+        successful_url = None
+        
+        for url in urls_to_try:
+            try:
+                logger.info(f"Probando URL en AntCube: {url}")
+                async with session.get(url, timeout=TIMEOUT) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        successful_url = url
+                        logger.info(f"URL exitosa en AntCube: {url}")
+                        break
+                    else:
+                        logger.debug(f"URL falló con código {response.status}: {url}")
+            except Exception as e:
+                logger.debug(f"Error probando URL {url}: {str(e)}")
+                continue
+        
+        if not html:
+            logger.warning(f"No se encontró información en AntCube para {species_name}")
+            return None
+            
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Extraer datos de AntCube
+            info = {
+                'scientific_name': species_name,
+                'description': None,
+                'difficulty_level': None,
+                'distribution': None,
+                'habitat': None,
+                'colony_form': None,
+                'queen_info': None,
+                'worker_info': None,
+                'nutrition': None,
+                'temperature': None,
+                'humidity': None,
+                'hibernation': None,
+                'nest_form': None,
+                'formicarium_type': None,
+                'development': None,
+                'photo_url': None
+            }
+            
+            # Buscar tabla con información técnica
+            table_rows = soup.find_all('tr')
+            for row in table_rows:
+                cells = row.find_all('td')
+                if len(cells) >= 2:
+                    label = cells[0].get_text().strip().lower()
+                    value = cells[1].get_text().strip()
+                    
+                    if 'mantener el nivel' in label or 'keeping level' in label:
+                        info['difficulty_level'] = value
+                    elif 'distribución' in label or 'distribution' in label:
+                        info['distribution'] = value
+                    elif 'hábitat' in label or 'habitat' in label:
+                        info['habitat'] = value
+                    elif 'colonyform' in label or 'forma de colonia' in label:
+                        info['colony_form'] = value
+                    elif 'reina' in label or 'queen' in label:
+                        info['queen_info'] = value
+                    elif 'trabajador' in label or 'worker' in label:
+                        info['worker_info'] = value
+                    elif 'nutrición' in label or 'nutrition' in label:
+                        info['nutrition'] = value
+                    elif 'temperatura' in label or 'temperature' in label:
+                        info['temperature'] = value
+                    elif 'humedad' in label or 'humidity' in label:
+                        info['humidity'] = value
+                    elif 'hibernación' in label or 'hibernation' in label:
+                        info['hibernation'] = value
+                    elif 'forma de nido' in label or 'nest form' in label:
+                        info['nest_form'] = value
+                    elif 'tipo de formicaria' in label or 'formicarium type' in label:
+                        info['formicarium_type'] = value
+                    elif 'desarrollo' in label or 'development' in label:
+                        info['development'] = value
+                    elif 'descripción' in label or 'description' in label:
+                        info['description'] = value
+            
+            # Buscar imagen principal del producto
+            img_element = soup.find('img', {'class': lambda x: x and ('product' in x.lower() or 'hormiga' in x.lower())})
+            if not img_element:
+                # Buscar cualquier imagen grande
+                img_element = soup.find('img', {'src': lambda x: x and any(ext in x.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])})
+            
+            if img_element and img_element.get('src'):
+                img_url = img_element.get('src')
+                if img_url.startswith('//'):
+                    img_url = 'https:' + img_url
+                elif img_url.startswith('/'):
+                    img_url = 'https://antcube.shop' + img_url
+                info['photo_url'] = img_url
+            
+            # Generar descripción combinada basada en los datos técnicos
+            if any(info.values()):
+                description_parts = []
+                
+                # Información básica
+                if info['difficulty_level']:
+                    description_parts.append(f"Nivel de mantenimiento: {info['difficulty_level']}")
+                
+                if info['habitat']:
+                    description_parts.append(f"Hábitat: {info['habitat'][:150]}{'...' if len(info['habitat']) > 150 else ''}")
+                
+                # Información de cría
+                if info['colony_form']:
+                    description_parts.append(f"Forma de colonia: {info['colony_form']}")
+                
+                if info['nutrition']:
+                    description_parts.append(f"Alimentación: {info['nutrition'][:100]}{'...' if len(info['nutrition']) > 100 else ''}")
+                
+                # Información técnica resumida
+                tech_info = []
+                if info['temperature']:
+                    tech_info.append(f"Temp: {info['temperature']}")
+                if info['humidity']:
+                    tech_info.append(f"Humedad: {info['humidity']}")
+                if info['hibernation'] and 'sí' in info['hibernation'].lower():
+                    tech_info.append("Hibernación necesaria")
+                
+                if tech_info:
+                    description_parts.append("Condiciones: " + ", ".join(tech_info))
+                
+                if description_parts:
+                    info['description'] = ". ".join(description_parts) + "."
+                
+                logger.info(f"Información obtenida de AntCube para {species_name}")
+                return info
+            else:
+                logger.warning(f"No se encontró información técnica en AntCube para {species_name}")
+                return None
+
+    except Exception as e:
+        logger.error(f"Error al buscar en AntCube: {str(e)}")
+        return None
+
 @dp.message(Command("reset_db"))
 async def reset_database(message: types.Message):
     """Reinicia las tablas de la base de datos"""
@@ -2655,6 +3269,399 @@ async def reset_database(message: types.Message):
     except Exception as e:
         logger.error(f"Error al reiniciar base de datos: {str(e)}")
         await message.answer('❌ Error al reiniciar la base de datos')
+
+@dp.message(Command("regenerar_descripciones"))
+async def regenerar_descripciones(message: types.Message):
+    """Regenera todas las descripciones existentes con los nuevos prompts mejorados"""
+    try:
+        logger.info(f"Comando regenerar_descripciones ejecutado por usuario {message.from_user.id}")
+        
+        # Verificar si es administrador
+        try:
+            admin_check = await is_admin(message.chat.id, message.from_user.id)
+            logger.info(f"Resultado verificación admin: {admin_check}")
+            if not admin_check:
+                await message.answer("❌ Solo los administradores pueden usar este comando.")
+                return
+        except Exception as e:
+            logger.error(f"Error verificando admin: {str(e)}")
+            await message.answer("❌ Error verificando permisos de administrador.")
+            return
+        
+        wait_message = await message.answer('🔄 Iniciando regeneración de descripciones...')
+        logger.info("Mensaje de inicio enviado")
+        
+        # Obtener todas las especies de la base de datos
+        try:
+            especies = db.get_all_species()
+            logger.info(f"Especies obtenidas: {len(especies) if especies else 0}")
+        except Exception as e:
+            logger.error(f"Error obteniendo especies: {str(e)}")
+            await wait_message.edit_text('❌ Error al obtener especies de la base de datos.')
+            return
+            
+        if not especies:
+            await wait_message.edit_text('❌ No se encontraron especies en la base de datos.')
+            return
+        
+        total_especies = len(especies)
+        regeneradas = 0
+        errores = 0
+        
+        await wait_message.edit_text(f'🔄 Regenerando {total_especies} descripciones...\nProgreso: 0/{total_especies}')
+        
+        for i, especie in enumerate(especies):
+            try:
+                scientific_name = especie['scientific_name']
+                logger.info(f"Regenerando descripción para: {scientific_name}")
+                
+                # Generar nueva descripción
+                nueva_descripcion = await generar_descripcion_especie(scientific_name)
+                
+                if nueva_descripcion:
+                    # Guardar la nueva descripción (sobrescribir la anterior)
+                    if db.save_species_description(scientific_name, nueva_descripcion):
+                        regeneradas += 1
+                        logger.info(f"Descripción regenerada para: {scientific_name}")
+                    else:
+                        errores += 1
+                        logger.error(f"Error guardando descripción para: {scientific_name}")
+                else:
+                    errores += 1
+                    logger.error(f"No se pudo generar descripción para: {scientific_name}")
+                
+                # Actualizar progreso cada 5 especies
+                if (i + 1) % 5 == 0 or i == total_especies - 1:
+                    await wait_message.edit_text(
+                        f'🔄 Regenerando descripciones...\n'
+                        f'Progreso: {i + 1}/{total_especies}\n'
+                        f'✅ Regeneradas: {regeneradas}\n'
+                        f'❌ Errores: {errores}'
+                    )
+                
+                # Pequeña pausa para no sobrecargar la API
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                errores += 1
+                logger.error(f"Error regenerando {especie.get('scientific_name', 'desconocida')}: {str(e)}")
+        
+        # Mensaje final
+        mensaje_final = (
+            f'✅ Regeneración completada!\n\n'
+            f'📊 **Resumen:**\n'
+            f'• Total especies: {total_especies}\n'
+            f'• Regeneradas exitosamente: {regeneradas}\n'
+            f'• Errores: {errores}\n'
+            f'• Tasa de éxito: {(regeneradas/total_especies*100):.1f}%'
+        )
+        
+        await wait_message.edit_text(mensaje_final, parse_mode=ParseMode.MARKDOWN)
+        logger.info(f"Regeneración completada: {regeneradas}/{total_especies} exitosas")
+        
+    except Exception as e:
+        logger.error(f"Error en regeneración de descripciones: {str(e)}")
+        await message.answer(f'❌ Error durante la regeneración de descripciones: {str(e)}')
+
+@dp.message(Command("test_regenerar"))
+async def test_regenerar(message: types.Message):
+    """Comando de prueba para verificar que el sistema funciona"""
+    try:
+        logger.info(f"Comando test_regenerar ejecutado por usuario {message.from_user.id}")
+        await message.answer("✅ El comando funciona correctamente!")
+        
+        # Probar obtener especies
+        especies = db.get_all_species()
+        await message.answer(f"📊 Especies en BD: {len(especies) if especies else 0}")
+        
+        # Probar verificación de admin
+        admin_check = await is_admin(message.chat.id, message.from_user.id)
+        await message.answer(f"🔐 Es admin: {admin_check}")
+        
+    except Exception as e:
+        logger.error(f"Error en test_regenerar: {str(e)}")
+        await message.answer(f"❌ Error: {str(e)}")
+
+@dp.message(Command("mi_id"))
+async def obtener_mi_id(message: types.Message):
+    """Obtiene tu ID de usuario para configurar como super admin"""
+    try:
+        user_id = message.from_user.id
+        username = message.from_user.username or message.from_user.first_name
+        chat_id = message.chat.id
+        
+        mensaje = (
+            f"🆔 **Tu información de Telegram:**\n\n"
+            f"👤 **Usuario:** {username}\n"
+            f"🔢 **Tu ID:** `{user_id}`\n"
+            f"💬 **Chat ID:** `{chat_id}`\n\n"
+            f"📝 **Para añadirte como super admin:**\n"
+            f"1. Copia tu ID: `{user_id}`\n"
+            f"2. Añádelo a la lista SUPER_ADMINS en el código\n"
+            f"3. Reinicia el bot\n\n"
+            f"💡 **Ejemplo en el código:**\n"
+            f"```python\n"
+            f"SUPER_ADMINS = [\n"
+            f"    {user_id},  # {username}\n"
+            f"]\n"
+            f"```"
+        )
+        
+        await message.answer(mensaje, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"Error en mi_id: {str(e)}")
+        await message.answer(f"❌ Error: {str(e)}")
+
+@dp.message(Command("regenerar_test"))
+async def regenerar_test(message: types.Message):
+    """Regenera solo las primeras 3 descripciones para prueba"""
+    try:
+        logger.info(f"Comando regenerar_test ejecutado por usuario {message.from_user.id}")
+        
+        # Verificar si es administrador
+        admin_check = await is_admin(message.chat.id, message.from_user.id)
+        if not admin_check:
+            await message.answer("❌ Solo los administradores pueden usar este comando.")
+            return
+        
+        wait_message = await message.answer('🔄 Iniciando regeneración de prueba (3 especies)...')
+        
+        # Obtener solo las primeras 3 especies
+        especies = db.get_all_species()
+        if not especies:
+            await wait_message.edit_text('❌ No se encontraron especies en la base de datos.')
+            return
+        
+        # Limitar a 3 especies para prueba
+        especies_test = especies[:3]
+        regeneradas = 0
+        errores = 0
+        
+        for i, especie in enumerate(especies_test):
+            try:
+                scientific_name = especie['scientific_name']
+                logger.info(f"Regenerando descripción para: {scientific_name}")
+                
+                # Generar nueva descripción
+                nueva_descripcion = await generar_descripcion_especie(scientific_name)
+                
+                if nueva_descripcion:
+                    logger.info(f"Descripción generada para {scientific_name}: {nueva_descripcion[:100]}...")
+                    # Guardar la nueva descripción
+                    if db.save_species_description(scientific_name, nueva_descripcion):
+                        regeneradas += 1
+                        logger.info(f"Descripción guardada exitosamente para: {scientific_name}")
+                        await wait_message.edit_text(f'✅ Regenerada: {scientific_name}\nProgreso: {i+1}/3')
+                    else:
+                        errores += 1
+                        logger.error(f"Error guardando descripción para: {scientific_name}")
+                else:
+                    errores += 1
+                    logger.error(f"No se pudo generar descripción para: {scientific_name}")
+                
+                await asyncio.sleep(2)  # Pausa más larga para prueba
+                
+            except Exception as e:
+                errores += 1
+                logger.error(f"Error regenerando {especie.get('scientific_name', 'desconocida')}: {str(e)}")
+        
+        await wait_message.edit_text(
+            f'✅ Prueba completada!\n'
+            f'Regeneradas: {regeneradas}/3\n'
+            f'Errores: {errores}'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error en regenerar_test: {str(e)}")
+        await message.answer(f'❌ Error: {str(e)}')
+
+@dp.message(Command("test_info"))
+async def test_info_completa(message: types.Message):
+    """Prueba la recopilación de información completa de todas las fuentes"""
+    try:
+        # Verificar si es administrador
+        admin_check = await is_admin(message.chat.id, message.from_user.id)
+        if not admin_check:
+            await message.answer("❌ Solo los administradores pueden usar este comando.")
+            return
+        
+        # Obtener especie del comando
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.answer("❌ Uso: /test_info Lasius niger")
+            return
+        
+        species_name = args[1].strip()
+        await message.answer(f"🔍 Recopilando información completa de {species_name}...")
+        
+        # Recopilar información de todas las fuentes
+        info_completa = await recopilar_informacion_completa(species_name)
+        
+        # Mostrar resultado
+        resultado = f"📊 **Información Recopilada:**\n\n"
+        resultado += f"🐜 **{species_name}**\n\n"
+        resultado += f"📚 **Fuentes consultadas:** {', '.join(info_completa['fuentes']) if info_completa['fuentes'] else 'Ninguna'}\n\n"
+        resultado += f"📸 **Imagen disponible:** {'✅ Sí' if info_completa.get('photo_url') else '❌ No'}\n\n"
+        
+        if info_completa.get('info_texto'):
+            resultado += f"📝 **Información encontrada:**\n{info_completa['info_texto'][:800]}{'...' if len(info_completa['info_texto']) > 800 else ''}"
+        else:
+            resultado += "📝 **Información encontrada:** Ninguna información específica disponible"
+        
+        await message.answer(resultado, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"Error en test_info_completa: {str(e)}")
+        await message.answer(f"❌ Error: {str(e)}")
+
+@dp.message(Command("test_vision"))
+async def test_vision(message: types.Message):
+    """Prueba el análisis de imagen con GPT-4 Vision"""
+    try:
+        # Verificar si es administrador
+        admin_check = await is_admin(message.chat.id, message.from_user.id)
+        if not admin_check:
+            await message.answer("❌ Solo los administradores pueden usar este comando.")
+            return
+        
+        # Obtener especie del comando
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.answer("❌ Uso: /test_vision Lasius niger")
+            return
+        
+        species_name = args[1].strip()
+        await message.answer(f"🔍 Analizando imagen de {species_name} con GPT-4 Vision...")
+        
+        # Generar descripción con análisis de imagen
+        descripcion = await generar_descripcion_con_imagen(species_name)
+        
+        if descripcion:
+            await message.answer(
+                f"✅ **Análisis Visual Completado:**\n\n"
+                f"🐜 **{species_name}**\n\n"
+                f"{descripcion}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await message.answer("❌ No se pudo analizar la imagen. Verifica que la especie tenga imagen en iNaturalist.")
+        
+    except Exception as e:
+        logger.error(f"Error en test_vision: {str(e)}")
+        await message.answer(f"❌ Error: {str(e)}")
+
+@dp.message(Command("diagnostico"))
+async def diagnostico_sistema(message: types.Message):
+    """Diagnóstico completo del sistema de regeneración"""
+    try:
+        # Verificar si es administrador
+        admin_check = await is_admin(message.chat.id, message.from_user.id)
+        if not admin_check:
+            await message.answer("❌ Solo los administradores pueden usar este comando.")
+            return
+        
+        await message.answer("🔍 Iniciando diagnóstico del sistema...")
+        
+        diagnostico = []
+        
+        # 1. Verificar clave de OpenAI
+        api_key = os.getenv('OPENAI_API_KEY')
+        if api_key:
+            diagnostico.append("✅ Clave de OpenAI configurada")
+        else:
+            diagnostico.append("❌ Clave de OpenAI NO encontrada")
+        
+        # 2. Verificar conexión a base de datos
+        try:
+            especies = db.get_all_species()
+            diagnostico.append(f"✅ Base de datos: {len(especies)} especies encontradas")
+        except Exception as e:
+            diagnostico.append(f"❌ Error en base de datos: {str(e)}")
+        
+        # 3. Probar generación de descripción simple
+        try:
+            if api_key:
+                from openai import AsyncOpenAI
+                client = AsyncOpenAI(api_key=api_key)
+                test_completion = await client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "user", "content": "Di solo 'Prueba exitosa'"}
+                    ],
+                    max_tokens=10
+                )
+                diagnostico.append("✅ OpenAI GPT-3.5 funciona correctamente")
+                
+                # Probar GPT-4 Vision
+                try:
+                    vision_test = await client.chat.completions.create(
+                        model="gpt-4-vision-preview",
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Di solo 'Vision OK'"
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=10
+                    )
+                    diagnostico.append("✅ OpenAI GPT-4 Vision disponible")
+                except Exception as ve:
+                    diagnostico.append(f"⚠️ GPT-4 Vision no disponible: {str(ve)}")
+            else:
+                diagnostico.append("⚠️ No se puede probar OpenAI sin clave")
+        except Exception as e:
+            diagnostico.append(f"❌ Error en OpenAI API: {str(e)}")
+        
+        # 4. Probar función de guardado
+        try:
+            test_save = db.save_species_description("test_species", "test_description")
+            if test_save:
+                diagnostico.append("✅ Función de guardado funciona")
+                # Limpiar el test
+                db.save_species_description("test_species", None)
+            else:
+                diagnostico.append("❌ Error en función de guardado")
+        except Exception as e:
+            diagnostico.append(f"❌ Error probando guardado: {str(e)}")
+        
+        # Enviar resultado
+        resultado = "🔍 **Diagnóstico del Sistema:**\n\n" + "\n".join(diagnostico)
+        await message.answer(resultado, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"Error en diagnóstico: {str(e)}")
+        await message.answer(f"❌ Error en diagnóstico: {str(e)}")
+
+@dp.message(Command("activar_cache_descripciones"))
+async def activar_cache_descripciones(message: types.Message):
+    """Reactiva el uso del caché para las descripciones (después de regeneración)"""
+    try:
+        # Verificar si es administrador
+        if not await is_admin(message.chat.id, message.from_user.id):
+            await message.answer("❌ Solo los administradores pueden usar este comando.")
+            return
+        
+        await message.answer(
+            '✅ **Caché de descripciones reactivado**\n\n'
+            '🔧 **Instrucciones para el desarrollador:**\n'
+            '1. Descomenta las líneas del caché en `generar_descripcion_especie()`\n'
+            '2. Descomenta las líneas del caché en `generar_descripcion_mejorada()`\n'
+            '3. Esto hará que el bot use las descripciones regeneradas\n\n'
+            '📝 **Ubicaciones en el código:**\n'
+            '• Líneas ~835-840 en `generar_descripcion_especie()`\n'
+            '• Líneas ~1040-1045 en `generar_descripcion_mejorada()`',
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Error en activar_cache_descripciones: {str(e)}")
+        await message.answer('❌ Error al mostrar instrucciones')
 
 async def obtener_distribucion_antmaps(scientific_name):
     """Obtiene la distribución geográfica de una especie desde AntMaps"""
@@ -3988,8 +4995,20 @@ async def enviar_mensaje_manual(message: types.Message):
         await message.answer(f"❌ Error al enviar los mensajes: {str(e)}")
 
 async def is_admin(chat_id, user_id):
-    """Verifica si un usuario es administrador del chat"""
+    """Verifica si un usuario es administrador del chat o super administrador"""
     try:
+        # Lista de super administradores (IDs de usuario de Telegram)
+        # AÑADE TU ID DE USUARIO AQUÍ
+        SUPER_ADMINS = [
+            5521536929,  # Mario - Chat personal para pruebas
+        ]
+        
+        # Si es super administrador, permitir acceso
+        if user_id in SUPER_ADMINS:
+            logger.info(f"Super administrador detectado: {user_id}")
+            return True
+        
+        # Si no es super admin, verificar si es admin del chat
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['administrator', 'creator']
     except Exception as e:

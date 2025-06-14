@@ -1,5 +1,51 @@
 # 🔧 Changelog - Mejoras al Comando `/especie`
 
+## 🆕 **[v2.1] - 2025-01-16: INTEGRACIÓN ANTCUBE.SHOP**
+
+### ✨ **Nueva Fuente de Información Especializada**
+
+**🏪 AntCube.shop** añadido como fuente especializada en **datos técnicos de cría**:
+
+#### 📊 **Información Extraída:**
+- **Nivel de dificultad** de mantenimiento (1-5)
+- **Condiciones específicas** de cría (temperatura, humedad)
+- **Información nutricional** especializada
+- **Datos de hibernación** y desarrollo
+- **Forma de colonia** (monogyne/polygyne)
+- **Hábitat natural** específico y detallado
+- **Datos de la reina y obreras**
+- **Tipo de formicario** recomendado
+
+#### 🔧 **Funciones Implementadas:**
+- `buscar_info_antcube()` - Extractor especializado con manejo de errores
+- Integración en `buscar_especie_completa()` con **prioridad para información técnica**
+- Mejoras en `generar_descripcion_mejorada()` para incorporar **datos de cría únicos**
+- **Manejo inteligente de captions largos** - Evita errores de Telegram con descripciones extensas
+
+#### 🎯 **Teclado de Enlaces Actualizado:**
+```
+🌐 AntWiki       🗺️ AntMaps
+📸 iNaturalist   🏪 AntMasterShop
+```
+*Cambio: AntOnTop → AntMasterShop.com*
+*Nota: AntCube se usa solo como fuente de información, no como enlace público*
+
+#### 📈 **Mejoras Técnicas:**
+- **AntCube prioritario** para información técnica específica
+- **Descripciones más completas** con datos únicos de mantenimiento
+- **Información complementaria** entre todas las fuentes
+- **Manejo automático de captions largos** (>1000 caracteres):
+  - Foto enviada primero con nombre científico
+  - Descripción completa en mensaje separado con enlaces
+  - Evita errores de límite de caracteres de Telegram
+
+#### 🔄 **Flujo Actualizado:**
+```
+1. BD exacta → 2. iNaturalist → 3. AntOnTop → 4. AntCube → 5. AntWiki → 6. IA + Guardar
+```
+
+---
+
 ## 📋 Resumen de Problemas Identificados y Solucionados
 
 ### ❌ **Problemas Originales:**
@@ -32,7 +78,8 @@ species_data = await buscar_especie_completa(normalized_name)
 **Fuentes consultadas en orden de prioridad:**
 1. **iNaturalist** - Fotos de alta calidad y datos de observación
 2. **AntOnTop** - Información detallada de comportamiento y cría
-3. **AntWiki** - Información científica y fotos de respaldo
+3. **AntCube** - Datos técnicos especializados de mantenimiento
+4. **AntWiki** - Información científica y fotos de respaldo
 
 ### **Paso 3: Generación de Descripción con IA Mejorada**
 ```python
@@ -94,10 +141,10 @@ REGLAS ESTRICTAS:
 
 ## 🔗 **Enlaces Mejorados**
 
-### **Nuevo Teclado de Enlaces:**
+### **Teclado de Enlaces Actualizado:**
 ```
-🌐 AntWiki    🗺️ AntMaps
-📸 iNaturalist  🏪 AntOnTop
+🌐 AntWiki       🗺️ AntMaps
+📸 iNaturalist   🏪 AntMasterShop
 ```
 
 ## 📊 **Beneficios de las Mejoras**
