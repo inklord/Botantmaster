@@ -772,6 +772,25 @@ def calcular_similitud(a, b):
     """Calcula el porcentaje de similitud entre dos cadenas"""
     return round(SequenceMatcher(None, a.lower(), b.lower()).ratio() * 100)
 
+def normalize_scientific_name(name):
+    """Normaliza un nombre científico para búsquedas consistentes"""
+    try:
+        # Limpiar espacios extra y convertir a formato estándar
+        name = ' '.join(name.strip().split())
+        
+        # Separar en palabras
+        words = name.split()
+        if len(words) >= 2:
+            # Formato estándar: Genus species
+            genus = words[0].capitalize()
+            species = words[1].lower()
+            return f"{genus} {species}"
+        
+        return name.title()
+    except Exception as e:
+        logger.error(f"Error normalizando nombre científico: {str(e)}")
+        return name.strip()
+
 def generar_resumen_basico(result, inat_info, antwiki_info, distribucion):
     """Genera un resumen básico de la información de la especie"""
     try:
@@ -879,27 +898,23 @@ async def generar_descripcion_especie(nombre_cientifico: str) -> str:
                                 next_elem = next_elem.find_next_sibling()
                         
                         # Preparar el prompt para ChatGPT
-                        prompt = f"""Genera un resumen BREVE Y CONCISO (máximo 800 caracteres en total) sobre la hormiga {nombre_cientifico} basado en la siguiente información de AntWiki. 
-                        El resumen debe ser en español y destacar solo los aspectos más interesantes y únicos de la especie.
+                        prompt = f"""Genera un resumen BREVE Y CONCISO (máximo 700 caracteres) sobre la hormiga {nombre_cientifico} basado en la siguiente información.
                         
                         Información disponible:
-                        
                         Descripción: {' '.join(info['description'][:1])}
-                        
                         Distribución: {' '.join(info['distribution'])}
-                        
                         Hábitat: {' '.join(info['habitat'])}
-                        
                         Comportamiento: {' '.join(info['behavior'])}
                         
-                        Medidas: {' '.join(info['measurements'])}
-                        
-                        IMPORTANTE:
-                        1. El resumen DEBE ser menor a 800 caracteres en total
-                        2. Usa máximo 2-3 emojis en todo el texto
-                        3. Estructura el texto en 2-3 líneas máximo
-                        4. Prioriza la información más interesante y única
-                        5. Si no hay información en alguna sección, omítela
+                        REGLAS IMPORTANTES:
+                        1. IGNORA completamente cualquier medida, longitud, tamaño o dimensión
+                        2. PRIORIZA comportamientos sociales, hábitos de anidación y alimentación
+                        3. DESTACA características físicas distintivas (colores, formas, estructuras especiales)
+                        4. Menciona datos curiosos sobre su ecología o distribución
+                        5. Máximo 700 caracteres total
+                        6. Usa máximo 2 emojis
+                        7. Texto en español, estilo científico divulgativo
+                        8. Si no hay información relevante, indica "Información limitada disponible"
                         """
                         
                         client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
@@ -930,9 +945,447 @@ async def generar_descripcion_especie(nombre_cientifico: str) -> str:
         logger.error(f"Error al generar descripción de especie: {str(e)}")
         return None
 
+async def buscar_especie_completa(scientific_name):
+    """Busca información completa de una especie en todas las fuentes externas"""
+    try:
+        logger.info(f"Iniciando búsqueda completa para: {scientific_name}")
+        
+        species_data = {
+            'scientific_name': scientific_name,
+            'description': None,
+            'photo_url': None,
+            'antontop_info': None,
+            'antwiki_info': None,
+            'inat_info': None,
+            'found_sources': []
+        }
+        
+        # Buscar en iNaturalist (prioridad para fotos)
+        try:
+            inat_info = await buscar_en_inaturalist(scientific_name)
+            if inat_info:
+                species_data['inat_info'] = inat_info
+                if inat_info.get('photo_url'):
+                    species_data['photo_url'] = inat_info['photo_url']
+                species_data['found_sources'].append('iNaturalist')
+                logger.info(f"Encontrado en iNaturalist: {scientific_name}")
+        except Exception as e:
+            logger.error(f"Error buscando en iNaturalist: {str(e)}")
+        
+        # Buscar en AntOnTop (prioridad para información detallada)
+        try:
+            antontop_info = await buscar_info_antontop(scientific_name)
+            if antontop_info:
+                species_data['antontop_info'] = antontop_info
+                if antontop_info.get('short_description'):
+                    species_data['description'] = antontop_info['short_description']
+                # Si no hay foto de iNaturalist, usar la de AntOnTop
+                if not species_data['photo_url'] and antontop_info.get('photo_url'):
+                    species_data['photo_url'] = antontop_info['photo_url']
+                species_data['found_sources'].append('AntOnTop')
+                logger.info(f"Encontrado en AntOnTop: {scientific_name}")
+        except Exception as e:
+            logger.error(f"Error buscando en AntOnTop: {str(e)}")
+        
+        # Buscar en AntWiki (información adicional y foto de respaldo)
+        try:
+            genus, species = scientific_name.split()[:2]
+            antwiki_info = await buscar_foto_antwiki(genus, species)
+            if antwiki_info:
+                species_data['antwiki_info'] = antwiki_info
+                # Si no hay foto anterior, usar la de AntWiki
+                if not species_data['photo_url'] and antwiki_info.get('photo_url'):
+                    species_data['photo_url'] = antwiki_info['photo_url']
+                species_data['found_sources'].append('AntWiki')
+                logger.info(f"Encontrado en AntWiki: {scientific_name}")
+        except Exception as e:
+            logger.error(f"Error buscando en AntWiki: {str(e)}")
+        
+        # Si no tenemos descripción, generarla con IA usando toda la información disponible
+        if not species_data['description']:
+            species_data['description'] = await generar_descripcion_mejorada(species_data)
+        
+        # Solo retornar si encontramos algo útil
+        if species_data['found_sources'] or species_data['photo_url'] or species_data['description']:
+            logger.info(f"Búsqueda completa exitosa para {scientific_name} - Fuentes: {species_data['found_sources']}")
+            return species_data
+        
+        logger.warning(f"No se encontró información para: {scientific_name}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error en búsqueda completa de {scientific_name}: {str(e)}")
+        return None
+
+async def generar_descripcion_mejorada(species_data):
+    """Genera descripción usando toda la información recopilada"""
+    try:
+        scientific_name = species_data['scientific_name']
+        
+        # Verificar si ya existe en caché
+        descripcion_cache = db.get_cached_description(scientific_name)
+        if descripcion_cache:
+            return descripcion_cache
+        
+        # Recopilar toda la información disponible
+        info_texto = f"Especie: {scientific_name}\n\n"
+        
+        # Información de AntOnTop
+        if species_data.get('antontop_info'):
+            antontop = species_data['antontop_info']
+            if antontop.get('short_description'):
+                info_texto += f"Descripción AntOnTop: {antontop['short_description']}\n"
+            if antontop.get('behavior'):
+                info_texto += f"Comportamiento: {antontop['behavior']}\n"
+            if antontop.get('region'):
+                info_texto += f"Origen: {antontop['region']}\n"
+        
+        # Información de AntWiki
+        if species_data.get('antwiki_info') and species_data['antwiki_info'].get('description'):
+            info_texto += f"Información AntWiki: {species_data['antwiki_info']['description']}\n"
+        
+        # Información de iNaturalist
+        if species_data.get('inat_info'):
+            inat = species_data['inat_info']
+            if inat.get('preferred_common_name'):
+                info_texto += f"Nombre común: {inat['preferred_common_name']}\n"
+        
+        # Prompt mejorado para IA
+        prompt = f"""Basándote en la siguiente información, genera una descripción breve y atractiva sobre esta especie de hormiga.
+
+{info_texto}
+
+REGLAS ESTRICTAS:
+1. MÁXIMO 600 caracteres total
+2. IGNORA completamente medidas, longitudes y dimensiones
+3. PRIORIZA: comportamientos únicos, estrategias de supervivencia, hábitos sociales
+4. DESTACA: características físicas distintivas (colores, formas especiales)
+5. INCLUYE: datos curiosos sobre ecología o distribución si están disponibles
+6. Estilo: científico divulgativo, accesible y fascinante
+7. Idioma: español
+8. Máximo 2 emojis apropiados
+9. Si la información es limitada, sé honesto pero positivo
+
+Responde SOLO con la descripción, sin explicaciones adicionales."""
+
+        client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        completion = await client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Eres un mirmecólogo experto que crea descripciones fascinantes y precisas sobre hormigas para el público general, evitando datos técnicos como medidas."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=200
+        )
+        
+        descripcion = completion.choices[0].message.content.strip()
+        
+        # Guardar en caché
+        if descripcion and db.save_species_description(scientific_name, descripcion):
+            logger.info(f"Descripción generada y guardada para: {scientific_name}")
+        
+        return descripcion
+        
+    except Exception as e:
+        logger.error(f"Error generando descripción mejorada: {str(e)}")
+        return "Información disponible sobre esta fascinante especie de hormiga. 🐜"
+
+async def enviar_informacion_especie_bd(message, species_result):
+    """Envía información de una especie encontrada en la base de datos"""
+    try:
+        scientific_name = species_result['scientific_name']
+        logger.info(f"Enviando información de BD para: {scientific_name}")
+        
+        # Obtener o generar descripción
+        descripcion = db.get_cached_description(scientific_name)
+        if not descripcion:
+            # Generar nueva descripción usando información disponible
+            descripcion = await generar_descripcion_especie(scientific_name)
+            if not descripcion:
+                descripcion = "Información disponible sobre esta especie de hormiga. 🐜"
+        
+        # Construir mensaje base
+        caption = f"🐜 *{scientific_name}*\n\n{descripcion}\n\n"
+        
+        # Agregar información adicional si está disponible
+        if species_result.get('region'):
+            caption += f"📍 *Región:* {species_result['region']}\n"
+        
+        # Obtener vuelos recientes
+        try:
+            vuelos = await obtener_vuelos_recientes(scientific_name)
+            if vuelos and vuelos.get('vuelos'):
+                caption += "\n📅 *Últimos vuelos registrados:*\n"
+                for vuelo in vuelos['vuelos'][:3]:
+                    caption += f"• {vuelo['fecha']} - {vuelo['ubicacion']}\n"
+        except:
+            pass
+        
+        # Crear botones de enlaces
+        keyboard = crear_teclado_enlaces(scientific_name)
+        
+        # Buscar y enviar foto
+        photo_url = await obtener_mejor_foto(scientific_name, species_result.get('photo_url'))
+        
+        if photo_url:
+            try:
+                await message.answer_photo(
+                    photo=photo_url,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=keyboard
+                )
+                return
+            except Exception as e:
+                logger.error(f"Error enviando foto desde BD: {str(e)}")
+        
+        # Si no hay foto o falla, enviar solo texto
+        await message.answer(
+            text=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
+        
+    except Exception as e:
+        logger.error(f"Error enviando información de BD: {str(e)}")
+        await message.answer("❌ Error al mostrar la información de la especie.")
+
+async def enviar_informacion_especie_externa(message, species_data):
+    """Envía información de una especie encontrada en fuentes externas"""
+    try:
+        scientific_name = species_data['scientific_name']
+        logger.info(f"Enviando información externa para: {scientific_name}")
+        
+        # Usar descripción generada o crear una básica
+        descripcion = species_data.get('description', "Información encontrada en fuentes externas. 🐜")
+        
+        # Construir mensaje
+        caption = f"🐜 *{scientific_name}*\n\n{descripcion}\n\n"
+        
+        # Agregar fuentes encontradas
+        if species_data.get('found_sources'):
+            fuentes = ", ".join(species_data['found_sources'])
+            caption += f"📚 *Fuentes:* {fuentes}\n"
+        
+        # Agregar información específica de AntOnTop
+        if species_data.get('antontop_info'):
+            antontop = species_data['antontop_info']
+            if antontop.get('behavior'):
+                caption += f"🔬 *Comportamiento:* {antontop['behavior'][:100]}{'...' if len(antontop['behavior']) > 100 else ''}\n"
+            if antontop.get('region'):
+                caption += f"🌍 *Origen:* {antontop['region']}\n"
+        
+        # Crear botones de enlaces
+        keyboard = crear_teclado_enlaces(scientific_name)
+        
+        # Enviar con foto si está disponible
+        if species_data.get('photo_url'):
+            try:
+                await message.answer_photo(
+                    photo=species_data['photo_url'],
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=keyboard
+                )
+                return
+            except Exception as e:
+                logger.error(f"Error enviando foto externa: {str(e)}")
+        
+        # Si no hay foto o falla, enviar solo texto
+        await message.answer(
+            text=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
+        
+    except Exception as e:
+        logger.error(f"Error enviando información externa: {str(e)}")
+        await message.answer("❌ Error al mostrar la información de la especie.")
+
+async def obtener_mejor_foto(scientific_name, bd_photo_url=None):
+    """Obtiene la mejor foto disponible siguiendo la prioridad: iNaturalist -> AntWiki -> BD"""
+    try:
+        # 1. Intentar iNaturalist (mejor calidad)
+        try:
+            inat_info = await buscar_en_inaturalist(scientific_name)
+            if inat_info and inat_info.get('photo_url'):
+                logger.info(f"Foto obtenida de iNaturalist para {scientific_name}")
+                return inat_info['photo_url']
+        except:
+            pass
+        
+        # 2. Intentar AntWiki como respaldo
+        try:
+            genus, species = scientific_name.split()[:2]
+            antwiki_info = await buscar_foto_antwiki(genus, species)
+            if antwiki_info and antwiki_info.get('photo_url'):
+                logger.info(f"Foto obtenida de AntWiki para {scientific_name}")
+                return antwiki_info['photo_url']
+        except:
+            pass
+        
+        # 3. Usar foto de BD si está disponible
+        if bd_photo_url:
+            logger.info(f"Usando foto de BD para {scientific_name}")
+            return bd_photo_url
+        
+        logger.warning(f"No se encontró foto para {scientific_name}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo foto para {scientific_name}: {str(e)}")
+        return bd_photo_url
+
+def crear_teclado_enlaces(scientific_name):
+    """Crea el teclado con enlaces a fuentes externas"""
+    try:
+        genus, species = scientific_name.split()[:2]
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🌐 AntWiki",
+                    url=f"https://www.antwiki.org/wiki/{genus}_{species}"
+                ),
+                InlineKeyboardButton(
+                    text="🗺️ AntMaps",
+                    url=f"https://antmaps.org/?mode=species&species={genus}%20{species}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📸 iNaturalist",
+                    url=f"https://www.inaturalist.org/taxa/search?q={genus}+{species}"
+                ),
+                InlineKeyboardButton(
+                    text="🏪 AntOnTop",
+                    url=f"https://antontop.com/es/{scientific_name.lower().replace(' ', '-')}/"
+                )
+            ]
+        ])
+    except:
+        # Fallback simple si hay error
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔍 Buscar en Google",
+                    url=f"https://www.google.com/search?q={urllib.parse.quote(scientific_name + ' ant species')}"
+                )
+            ]
+        ])
+
+async def guardar_especie_nueva(species_data):
+    """Guarda una nueva especie en la base de datos"""
+    try:
+        scientific_name = species_data['scientific_name']
+        
+        # Preparar datos para guardar
+        genus, species = scientific_name.split()[:2]
+        photo_url = species_data.get('photo_url')
+        
+        # URLs de fuentes
+        antwiki_url = f"https://www.antwiki.org/wiki/{genus}_{species}"
+        
+        # ID de iNaturalist si está disponible
+        inat_id = None
+        if species_data.get('inat_info'):
+            inat_id = species_data['inat_info'].get('id')
+        
+        # Región si está disponible
+        region = None
+        if species_data.get('antontop_info'):
+            region = species_data['antontop_info'].get('region')
+        
+        # Guardar en base de datos
+        success = db.add_species(
+            scientific_name,
+            antwiki_url=antwiki_url,
+            photo_url=photo_url,
+            inat_id=str(inat_id) if inat_id else None,
+            region=region
+        )
+        
+        if success:
+            logger.info(f"Especie guardada exitosamente: {scientific_name}")
+            
+            # Guardar descripción en caché si existe
+            if species_data.get('description'):
+                db.save_species_description(scientific_name, species_data['description'])
+        else:
+            logger.error(f"Error guardando especie: {scientific_name}")
+            
+        return success
+        
+    except Exception as e:
+        logger.error(f"Error guardando nueva especie: {str(e)}")
+        return False
+
+async def mostrar_sugerencias_especies(message, query, especies_similares):
+    """Muestra sugerencias de especies similares"""
+    try:
+        mensaje = f"🔍 No encontré exactamente '{query}'. ¿Te refieres a alguna de estas especies?\n\n"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        for especie in especies_similares[:5]:
+            mensaje += f"• *{especie['nombre']}* (Similitud: {especie['similitud']}%)\n"
+            if especie.get('region') and especie['region'] != 'No especificada':
+                mensaje += f"  📍 {especie['region']}\n"
+            mensaje += "\n"
+            
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    text=f"Ver {especie['nombre']}",
+                    callback_data=f"ver_especie:{especie['nombre']}"
+                )
+            ])
+        
+        mensaje += "Haz clic en los botones para ver información detallada."
+        
+        await message.answer(
+            text=mensaje,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
+        
+    except Exception as e:
+        logger.error(f"Error mostrando sugerencias: {str(e)}")
+        await enviar_mensaje_no_encontrada(message, query)
+
+async def enviar_mensaje_no_encontrada(message, query):
+    """Envía mensaje cuando no se encuentra ninguna información"""
+    try:
+        mensaje = (
+            f"❌ No se encontró información sobre '*{query}*'.\n\n"
+            "**Sugerencias:**\n"
+            "• Verifica la ortografía del nombre científico\n"
+            "• Asegúrate de incluir género y especie\n"
+            "• Ejemplo correcto: *Messor barbarus*\n\n"
+            "💡 *¿Sabías que?* Tengo información sobre miles de especies de hormigas. "
+            "Prueba con nombres más comunes como *Lasius niger* o *Formica rufa*."
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔍 Buscar en Google",
+                    url=f"https://www.google.com/search?q={urllib.parse.quote(query + ' ant species')}"
+                )
+            ]
+        ])
+        
+        await message.answer(
+            text=mensaje,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
+        
+    except Exception as e:
+        logger.error(f"Error enviando mensaje no encontrada: {str(e)}")
+        await message.answer("❌ No se encontró información sobre la especie solicitada.")
+
 @dp.message(Command("especie"))
 async def especie(message: types.Message):
-    """Muestra información sobre una especie de hormiga"""
+    """Muestra información sobre una especie de hormiga siguiendo el flujo optimizado"""
     try:
         # Registrar interacción
         await db.log_user_interaction(
@@ -954,251 +1407,40 @@ async def especie(message: types.Message):
             )
             return
         
-        # Buscar especies similares
-        especies_similares = encontrar_especies_similares(args)
+        # Normalizar nombre científico
+        normalized_name = normalize_scientific_name(args)
         
-        # Si hay una coincidencia muy alta (>90%), mostrar directamente esa especie
-        if especies_similares and especies_similares[0]['similitud'] > 90:
-            mejor_coincidencia = especies_similares[0]
-            result = db.find_species_by_name(mejor_coincidencia['nombre'])
-            if result:
-                logger.info(f"Mostrando información para: {result['scientific_name']}")
-                
-                # Generar descripción con ChatGPT
-                descripcion = await generar_descripcion_especie(result['scientific_name'])
-                if not descripcion:
-                    descripcion = "❌ Lo siento, no pude generar una descripción detallada para esta especie."
-                
-                # Construir el mensaje
-                caption = f"🐜 *{result['scientific_name']}*\n\n{descripcion}\n\n"
-                
-                # Obtener vuelos recientes
-                vuelos = await obtener_vuelos_recientes(result['scientific_name'])
-                if vuelos:
-                    caption += "\n📅 *Últimos vuelos registrados:*\n"
-                    for vuelo in vuelos.get('vuelos', [])[:3]:
-                        caption += f"• {vuelo['fecha']} - {vuelo['ubicacion']}\n"
-                
-                # Crear botones para enlaces externos
-                genus, species = result['scientific_name'].split()[:2]
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🌐 AntWiki",
-                            url=f"https://www.antwiki.org/wiki/{genus}_{species}"
-                        ),
-                        InlineKeyboardButton(
-                            text="🗺️ AntMaps",
-                            url=f"https://antmaps.org/?mode=species&species={genus}%20{species}"
-                        ),
-                        InlineKeyboardButton(
-                            text="📸 iNaturalist",
-                            url=f"https://www.inaturalist.org/taxa/search?q={genus}+{species}"
-                        )
-                    ]
-                ])
-                
-                # Buscar fotos en múltiples fuentes
-                photos = []
-                
-                # 1. Foto de la base de datos
-                if result.get('photo_url'):
-                    photos.append(InputMediaPhoto(
-                        media=result['photo_url'],
-                        caption=caption if len(photos) == 0 else None,
-                        parse_mode=ParseMode.MARKDOWN
-                    ))
-                
-                # 2. Foto de iNaturalist
-                inat_info = await buscar_en_inaturalist(result['scientific_name'])
-                if inat_info and inat_info.get('photo_url'):
-                    photos.append(InputMediaPhoto(
-                        media=inat_info['photo_url'],
-                        caption=caption if len(photos) == 0 else None,
-                        parse_mode=ParseMode.MARKDOWN
-                    ))
-                
-                # Si no hay fotos, enviar solo el texto
-                if not photos:
-                    await message.answer(
-                        text=caption,
-                        parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=keyboard
-                    )
-                # Si hay una sola foto, usar answer_photo
-                elif len(photos) == 1:
-                    try:
-                        await message.answer_photo(
-                            photo=photos[0].media,
-                            caption=caption,
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=keyboard
-                        )
-                    except Exception as e:
-                        logger.error(f"Error al enviar foto: {str(e)}")
-                        await message.answer(
-                            text=caption,
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=keyboard
-                        )
-                # Si hay múltiples fotos, usar media group
-                else:
-                    try:
-                        # Enviar el grupo de fotos
-                        await message.answer_media_group(media=photos)
-                        # Enviar el mensaje con los botones por separado
-                        await message.answer(
-                            text="🔍 Enlaces adicionales:",
-                            reply_markup=keyboard
-                        )
-                    except Exception as e:
-                        logger.error(f"Error al enviar grupo de fotos: {str(e)}")
-                        # Si falla, intentar enviar solo la primera foto
-                        try:
-                            await message.answer_photo(
-                                photo=photos[0].media,
-                                caption=caption,
-                                parse_mode=ParseMode.MARKDOWN,
-                                reply_markup=keyboard
-                            )
-                        except Exception as e:
-                            logger.error(f"Error al enviar foto individual: {str(e)}")
-                            await message.answer(
-                                text=caption,
-                                parse_mode=ParseMode.MARKDOWN,
-                                reply_markup=keyboard
-                            )
-                return
+        # PASO 1: Buscar exactamente en la base de datos
+        logger.info(f"Buscando en BD: {normalized_name}")
+        result = db.find_species_by_name(normalized_name)
         
-        # Si no hay especies locales con alta similitud (>80%), buscar en internet
-        if not especies_similares or especies_similares[0]['similitud'] <= 80:
-            await message.answer("🔍 No encontré esa especie en mi base de datos local. Buscando en internet...")
-            
-            try:
-                # Buscar en iNaturalist
-                inat_info = await buscar_en_inaturalist(args)
-                
-                if inat_info:
-                    logger.info(f"Encontrada información en iNaturalist para: {args}")
-                    
-                    # Generar descripción con ChatGPT usando la información encontrada
-                    descripcion = await generar_descripcion_especie(args)
-                    if not descripcion:
-                        descripcion = "Información encontrada en fuentes externas."
-                    
-                    # Construir mensaje con información de iNaturalist
-                    nombre_cientifico = inat_info.get('scientific_name', args)
-                    caption = f"🐜 *{nombre_cientifico}* (Fuente: iNaturalist)\n\n{descripcion}\n\n"
-                    
-                    if inat_info.get('common_name'):
-                        caption += f"**Nombre común:** {inat_info['common_name']}\n"
-                    if inat_info.get('observations_count'):
-                        caption += f"**Observaciones:** {inat_info['observations_count']}\n"
-                    if inat_info.get('taxonomy'):
-                        caption += f"**Taxonomía:** {inat_info['taxonomy']}\n"
-                    
-                    # Crear botones para enlaces externos
-                    if ' ' in nombre_cientifico:
-                        genus, species = nombre_cientifico.split()[:2]
-                        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="🌐 AntWiki",
-                                    url=f"https://www.antwiki.org/wiki/{genus}_{species}"
-                                ),
-                                InlineKeyboardButton(
-                                    text="🗺️ AntMaps",
-                                    url=f"https://antmaps.org/?mode=species&species={genus}%20{species}"
-                                ),
-                                InlineKeyboardButton(
-                                    text="📸 iNaturalist",
-                                    url=f"https://www.inaturalist.org/taxa/search?q={genus}+{species}"
-                                )
-                            ]
-                        ])
-                    else:
-                        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="📸 iNaturalist",
-                                    url=f"https://www.inaturalist.org/taxa/search?q={args}"
-                                )
-                            ]
-                        ])
-                    
-                    # Enviar información con foto si está disponible
-                    if inat_info.get('photo_url'):
-                        try:
-                            await message.answer_photo(
-                                photo=inat_info['photo_url'],
-                                caption=caption,
-                                parse_mode=ParseMode.MARKDOWN,
-                                reply_markup=keyboard
-                            )
-                        except Exception as e:
-                            logger.error(f"Error al enviar foto de iNaturalist: {str(e)}")
-                            await message.answer(
-                                text=caption,
-                                parse_mode=ParseMode.MARKDOWN,
-                                reply_markup=keyboard
-                            )
-                    else:
-                        await message.answer(
-                            text=caption,
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=keyboard
-                        )
-                    return
-                
-                # Si no se encuentra en iNaturalist, intentar con Google
-                google_results = await buscar_especie_google(args)
-                if google_results:
-                    await message.answer(
-                        f"🌐 **Información encontrada en Google:**\n\n{google_results}\n\n"
-                        f"🔗 [Buscar más información](https://www.google.com/search?q={urllib.parse.quote(args + ' ant species')})",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                    return
-                    
-            except Exception as e:
-                logger.error(f"Error al buscar en internet: {str(e)}")
+        if result:
+            logger.info(f"Especie encontrada en BD: {result['scientific_name']}")
+            await enviar_informacion_especie_bd(message, result)
+            return
         
-        # Si no se encontró nada en internet, mostrar sugerencias locales si las hay
-        if especies_similares:
-            mensaje = f"🔍 No encontré exactamente '{args}'. ¿Te refieres a alguna de estas especies de mi base de datos?\n\n"
+        # PASO 2: Si no está en BD, buscar en fuentes externas y guardar
+        logger.info(f"Especie no encontrada en BD, buscando externamente: {normalized_name}")
+        await message.answer("🔍 Especie no encontrada en mi base de datos. Buscando en fuentes externas...")
+        
+        # Buscar en todas las fuentes externas
+        species_data = await buscar_especie_completa(normalized_name)
+        
+        if species_data:
+            # Guardar en base de datos para futuros accesos
+            logger.info(f"Guardando nueva especie en BD: {species_data['scientific_name']}")
+            await guardar_especie_nueva(species_data)
             
-            # Mostrar hasta 5 sugerencias con botones
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-            for especie in especies_similares[:5]:
-                mensaje += f"• *{especie['nombre']}* (Similitud: {especie['similitud']}%)\n"
-                if especie['region'] != 'No especificada':
-                    mensaje += f"  📍 Región: {especie['region']}\n"
-                mensaje += "\n"
-                
-                keyboard.inline_keyboard.append([
-                    InlineKeyboardButton(
-                        text=f"Ver {especie['nombre']}",
-                        callback_data=f"ver_especie:{especie['nombre']}"
-                    )
-                ])
-                
-            mensaje += "\nPuedes hacer clic en los botones para ver la información de cada especie."
-            
-            await message.answer(
-                text=mensaje,
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=keyboard
-            )
+            # Mostrar información de la especie encontrada
+            await enviar_informacion_especie_externa(message, species_data)
         else:
-            # No se encontró nada ni local ni en internet
-            await message.answer(
-                f"❌ No se encontró información sobre '{args}' ni en mi base de datos ni en fuentes externas.\n\n"
-                "Asegúrate de escribir el nombre científico completo (género y especie).\n"
-                "Ejemplo: Messor barbarus\n\n"
-                f"🔗 [Buscar en Google](https://www.google.com/search?q={urllib.parse.quote(args + ' ant species')})",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
+            # Buscar especies similares como último recurso
+            especies_similares = encontrar_especies_similares(args, umbral=50)
+            if especies_similares:
+                await mostrar_sugerencias_especies(message, args, especies_similares)
+            else:
+                await enviar_mensaje_no_encontrada(message, args)
+                
     except Exception as e:
         logger.error(f"Error al buscar especie: {str(e)}")
         await message.answer("❌ Lo siento, hubo un error al buscar la especie. Por favor, intenta de nuevo.")
